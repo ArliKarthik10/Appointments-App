@@ -7,6 +7,7 @@ class DoctorCreate(BaseModel):
     name: str
     email: EmailStr
     password: str
+    license_number: str
 
 
 class PatientCreate(BaseModel):
@@ -19,6 +20,8 @@ class DoctorOut(BaseModel):
     id: int
     name: str
     email: EmailStr
+    license_number: str
+    is_verified: int
 
     class Config:
         orm_mode = True
@@ -52,6 +55,8 @@ class AppointmentOut(BaseModel):
     patient_id: int
     date: datetime.date
     slot: int
+    status: str = "PENDING"
+    is_rescheduled: int = 0
 
     class Config:
         orm_mode = True
@@ -70,6 +75,8 @@ class SlotStatus(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    role: Optional[str] = None
+    is_verified: Optional[int] = None
 
 
 class TokenData(BaseModel):

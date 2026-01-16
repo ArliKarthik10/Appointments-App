@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from . import database, models, schemas, crud
@@ -9,10 +9,23 @@ from .auth import (
 )
 import datetime
 from sqlalchemy.exc import IntegrityError
+from fastapi.middleware.cors import CORSMiddleware
+
+
+
 
 app = FastAPI(title="Appointment Backend")
 
+#to integrate with frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+#database initialization(connection to the database and creating tables)
 @app.on_event("startup")
 def startup():
     models.Base.metadata.create_all(bind=database.engine)
@@ -23,7 +36,7 @@ def get_db():
 
 
 @app.post("/doctors", response_model=schemas.DoctorOut)
-def create_doctor(doc_in: schemas.DoctorCreate, db: Session = Depends(get_db)):
+def create_doctor(doc_in: schemas.DoctorCreate, db: Session = Depends(get_db)):  #depends work as middleware
     try:
         doc = crud.create_doctor(db, doc_in)
         return doc
@@ -46,8 +59,21 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
-    access_token = create_access_token(data={"sub": user.email, "role": user.role})
-    return {"access_token": access_token, "token_type": "bearer"}
+    access_token = create_access_token(
+        data={
+        "sub": user.email,
+        "role": user.role,
+        "id": user.id,   
+        }
+    )
+
+    return {
+    "access_token": access_token,
+    "token_type": "bearer",
+    "role": user.role,
+    "is_verified": getattr(user, 'is_verified', 1)
+    }
+
 
 
 @app.get("/doctors")
@@ -112,16 +138,225 @@ def cancel_appointment(
     # Only the assigned doctor can delete/cancel the appointment
     if current_user.role != "doctor" or appt.doctor_id != current_user.id:
         raise HTTPException(status_code=403, detail="only the assigned doctor can cancel this appointment")
+    
+    # Check if doctor is verified (is_verified is 0 or 1 from database)
+    if current_user.is_verified == 0:
+        raise HTTPException(status_code=403, detail="Your account is not verified by admin yet. Please wait.")
+    
     cancelled = crud.cancel_appointment(db, appointment_id)
     return cancelled
 
 
-@app.get("/patients/{patient_id}/appointments")
+@app.get("/patients/me/appointments")
 def patient_appointments(
-    patient_id: int, db: Session = Depends(get_db), current_user: object = Depends(get_current_user)
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
 ):
-    # Only the same patient can fetch their appointments
-    if current_user.role != "patient" or current_user.id != patient_id:
+    if current_user.role != "patient":
         raise HTTPException(status_code=403, detail="forbidden")
-    appts = crud.get_patient_appointments(db, patient_id)
+
+    appts = crud.get_patient_appointments(db, current_user.id)
     return appts
+
+
+
+@app.get("/doctors/me/appointments")
+def doctor_appointments(
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    if current_user.role != "doctor":
+        raise HTTPException(status_code=403, detail="forbidden")
+    
+    # Check if doctor is verified (is_verified is 0 or 1 from database)
+    if current_user.is_verified == 0:
+        raise HTTPException(status_code=403, detail="Your account is not verified by admin yet. Please wait.")
+
+    appts = (
+        db.query(models.Appointment)
+        .filter(models.Appointment.doctor_id == current_user.id)
+        .all()
+    )
+    return appts
+
+
+@app.post("/appointments/{appointment_id}/approve")
+def approve_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    appt = db.query(models.Appointment).filter_by(id=appointment_id).first()
+
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    if current_user.role != "doctor" or appt.doctor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    
+    # Check if doctor is verified (is_verified is 0 or 1 from database)
+    if current_user.is_verified == 0:
+        raise HTTPException(status_code=403, detail="Your account is not verified by admin yet. Please wait.")
+
+    appt.status = "BOOKED"
+    db.commit()
+    db.refresh(appt)
+    return appt
+
+
+
+@app.post("/appointments/{appointment_id}/reject")
+def reject_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    appt = db.query(models.Appointment).filter_by(id=appointment_id).first()
+
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    if current_user.role != "doctor" or appt.doctor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    
+    # Check if doctor is verified (is_verified is 0 or 1 from database)
+    if current_user.is_verified == 0:
+        raise HTTPException(status_code=403, detail="Your account is not verified by admin yet. Please wait.")
+
+    appt.status = "CANCELLED"
+    db.commit()
+    db.refresh(appt)
+    return appt
+
+
+@app.post("/doctors/register")
+def register_doctor(data: schemas.DoctorCreate, db: Session = Depends(get_db)):
+    doctor = models.Doctor(
+        name=data.name,
+        email=data.email,
+        hashed_password=crud.get_password_hash(data.password),
+        license_number=data.license_number,
+        is_verified=0
+    )
+    db.add(doctor)
+    db.commit()
+    db.refresh(doctor)
+    return {"message": "Doctor registered. Await admin verification"}
+
+
+@app.get("/admin/pending-doctors")
+def pending_doctors(
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+
+    doctors = db.query(models.Doctor).filter(models.Doctor.is_verified == 0).all()
+    return doctors
+
+
+@app.put("/admin/verify-doctor/{doctor_id}")
+def verify_doctor(
+    doctor_id: int,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+
+    doctor = db.query(models.Doctor).filter(models.Doctor.id == doctor_id).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    doctor.is_verified = 1
+    db.commit()
+    return {"message": "Doctor verified"}
+
+
+@app.put("/admin/reject-doctor/{doctor_id}")
+def reject_doctor(
+    doctor_id: int,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+
+    doctor = db.query(models.Doctor).filter(models.Doctor.id == doctor_id).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    doctor.is_verified = 2  # 2 = rejected
+    db.commit()
+    return {"message": "Doctor rejected"}
+
+
+@app.get("/admin/all-doctors")
+def get_all_doctors(
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+
+    doctors = crud.get_all_doctors_with_status(db)
+    return doctors
+
+
+@app.post("/appointments/{appointment_id}/reschedule")
+def reschedule_appointment(
+    appointment_id: int,
+    new_date: str = Query(...),
+    new_slot: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    if current_user.role != "patient":
+        raise HTTPException(status_code=403, detail="only patients can reschedule appointments")
+    
+    appt = db.query(models.Appointment).filter(models.Appointment.id == appointment_id).first()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    
+    if appt.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only reschedule your own appointments")
+    
+    if appt.status != "BOOKED":
+        raise HTTPException(status_code=400, detail="Can only reschedule confirmed appointments")
+    
+    try:
+        date_obj = datetime.date.fromisoformat(new_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format; use YYYY-MM-DD")
+    
+    try:
+        updated_appt = crud.reschedule_appointment(db, appointment_id, date_obj, new_slot)
+        return updated_appt
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="New slot already booked")
+
+
+@app.post("/appointments/{appointment_id}/patient-cancel")
+def patient_cancel_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    current_user: object = Depends(get_current_user),
+):
+    if current_user.role != "patient":
+        raise HTTPException(status_code=403, detail="only patients can cancel their appointments")
+    
+    appt = db.query(models.Appointment).filter(models.Appointment.id == appointment_id).first()
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    
+    if appt.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only cancel your own appointments")
+    
+    if appt.status != "BOOKED":
+        raise HTTPException(status_code=400, detail="Can only cancel confirmed appointments")
+    
+    cancelled = crud.cancel_appointment(db, appointment_id)
+    return cancelled

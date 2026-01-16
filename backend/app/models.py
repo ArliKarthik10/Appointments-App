@@ -6,13 +6,23 @@ from .database import Base
 
 class Doctor(Base):
     __tablename__ = "doctors"
+
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     email = Column(String, nullable=False, unique=True, index=True)
     hashed_password = Column(String, nullable=False)
+
+    # 🔐 verification fields
+    license_number = Column(String, nullable=False,unique=True)
+    is_verified = Column(Integer, default=0)  # 0 = not verified, 1 = verified
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    appointments = relationship("Appointment", back_populates="doctor", foreign_keys='Appointment.doctor_id')
+    appointments = relationship(
+        "Appointment",
+        back_populates="doctor",
+        foreign_keys="Appointment.doctor_id"
+    )
 
 
 class Patient(Base):
@@ -34,6 +44,9 @@ class Appointment(Base):
     date = Column(Date, nullable=False)
     slot = Column(Integer, nullable=False)  # 1..4
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    status = Column(String, default="PENDING")  # PENDING, BOOKED, CANCELLED, REJECTED
+    is_rescheduled = Column(Integer, default=0)  # 0 = no, 1 = yes
 
     __table_args__ = (
         UniqueConstraint("doctor_id", "date", "slot", name="uix_doctor_date_slot"),

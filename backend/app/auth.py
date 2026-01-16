@@ -17,6 +17,11 @@ pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
 
+ADMIN_EMAIL = "admin@hospital.com"
+ADMIN_PASSWORD = "admin123"
+
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -36,43 +41,80 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     return encoded_jwt
 
 
+
 def authenticate_user(db: Session, email: str, password: str):
-    # Try doctor
+
+    # 🔐 ADMIN LOGIN (HARDCODED)
+    if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+        return SimpleNamespace(id=0, role="admin", email=email, is_verified=True)
+
+    # 👨‍⚕️ DOCTOR
     doctor = db.query(models.Doctor).filter(models.Doctor.email == email).first()
     if doctor and verify_password(password, doctor.hashed_password):
-        return SimpleNamespace(id=doctor.id, role="doctor", email=doctor.email)
+        # Return doctor object with is_verified flag - let frontend handle verification status
+        return SimpleNamespace(id=doctor.id, role="doctor", email=doctor.email, is_verified=doctor.is_verified, name=doctor.name)
+
+    # 🧑‍🦱 PATIENT
     patient = db.query(models.Patient).filter(models.Patient.email == email).first()
     if patient and verify_password(password, patient.hashed_password):
-        return SimpleNamespace(id=patient.id, role="patient", email=patient.email)
+        return SimpleNamespace(id=patient.id, role="patient", email=patient.email, is_verified=True, name=patient.name)
+
     return None
+
+
 
 
 def get_db():
     yield from database.get_db()
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+from types import SimpleNamespace
+
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
+        email: str = payload.get("sub")
         role: str = payload.get("role")
-        if username is None or role is None:
+        user_id: int = payload.get("id")
+
+        if not email or not role or user_id is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    # load the user record so we have the id and can validate existence
+
+    # DOCTOR
     if role == "doctor":
-        record = db.query(models.Doctor).filter(models.Doctor.email == username).first()
-        if not record:
+        doctor = (
+            db.query(models.Doctor)
+            .filter(models.Doctor.id == user_id)
+            .first()
+        )
+        if not doctor:
             raise credentials_exception
-        return SimpleNamespace(id=record.id, role="doctor", email=record.email)
-    else:
-        record = db.query(models.Patient).filter(models.Patient.email == username).first()
-        if not record:
+        return SimpleNamespace(id=doctor.id, role="doctor", email=doctor.email, is_verified=doctor.is_verified, name=doctor.name)
+
+    # PATIENT
+    if role == "patient":
+        patient = (
+            db.query(models.Patient)
+            .filter(models.Patient.id == user_id)
+            .first()
+        )
+        if not patient:
             raise credentials_exception
-        return SimpleNamespace(id=record.id, role="patient", email=record.email)
+        return SimpleNamespace(id=patient.id, role="patient", email=patient.email, is_verified=True, name=patient.name)
+
+    # ADMIN
+    if role == "admin":
+        return SimpleNamespace(id=0, role="admin", email=email, is_verified=True)
+
+    raise credentials_exception

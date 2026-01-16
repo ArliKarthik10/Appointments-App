@@ -6,7 +6,7 @@ SQLALCHEMY_DATABASE_URL = "sqlite:///./appointments.db"
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
-
+#it works on individual sessions it completes request and then commit changes
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
